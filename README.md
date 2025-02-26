@@ -2,7 +2,7 @@
 
 ![kuksa.val Logo](./doc/img/logo.png)
 
-The aim of this script is to provide and replay VSS data into a [KUKSA Databroker](https://github.com/eclipse/kuksa.val/tree/master/kuksa_databroker).
+The aim of this script is to provide and replay VSS data into a [KUKSA Databroker](https://github.com/eclipse-kuksa/kuksa-databroker).
 Therefore, it takes a CSV-file, containting pre-defined sequences of VSS signals including timing delays, and provides it to the KUKSA Databroker.
 
 ## Usage
