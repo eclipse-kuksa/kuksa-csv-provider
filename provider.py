@@ -1,7 +1,7 @@
 #! /usr/bin/env python3
 
 ########################################################################
-# Copyright (c) 2023 Contributors to the Eclipse Foundation
+# Copyright (c) 2023-2026 Contributors to the Eclipse Foundation
 #
 # See the NOTICE file(s) distributed with this work for additional
 # information regarding copyright ownership.
@@ -24,12 +24,8 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-from kuksa_client.grpc import Datapoint
-from kuksa_client.grpc import DataEntry
-from kuksa_client.grpc import EntryUpdate
-from kuksa_client.grpc import Field
-from kuksa_client.grpc import VSSClientError
-from kuksa_client.grpc.aio import VSSClient
+from kuksa_client.v2.aio import KuksaClient
+from kuksa_client.v2 import KuksaError
 
 
 def init_argparse() -> argparse.ArgumentParser:
@@ -126,8 +122,8 @@ async def main():
     if isinstance(numeric_value, int):
         logging.basicConfig(encoding='utf-8', level=numeric_value)
     try:
-        async with VSSClient(host, port, root_certificates=root_path,
-                             tls_server_name=tls_server_name) as client:
+        async with KuksaClient(host, port, root_certificates=root_path,
+                               tls_server_name=tls_server_name) as client:
             csvfile = open(args.file, newline='', encoding="utf-8")
             signal_reader = csv.DictReader(csvfile,
                                            delimiter=',',
@@ -142,7 +138,7 @@ async def main():
                     await process_rows(client, rows)
             else:
                 await process_rows(client, signal_reader)
-    except VSSClientError as error:
+    except KuksaError as error:
         logging.error("Could not connect to the KUKSA databroker at %s:"
                       "\n %s"
                       "\nMake sure the KUKSA databroker is running and reachable.", server_uri, error)
@@ -152,26 +148,18 @@ async def process_rows(client, rows):
     '''Processes a single row from the CSV-file and write the
      recorded signal to the data broker through the client.'''
     for row in rows:
-        if row['field'] == "current":
-            entry = DataEntry(
-                row['signal'],
-                value=Datapoint(value=row['value']),
-            )
-            updates = (EntryUpdate(entry, (Field.VALUE,)),)
-            logging.info("Update current value of %s to %s", row['signal'], row['value'])
-        elif row['field'] == "target":
-            entry = DataEntry(
-                row['signal'],
-                actuator_target=Datapoint(value=row['value'])
-            )
-            updates = (EntryUpdate(entry, (Field.ACTUATOR_TARGET,)),)
-            logging.info("Update target value of %s to %s", row['signal'], row['value'])
-        else:
-            updates = []
         try:
-            await client.set(updates=updates)
-        except VSSClientError as ex:
+            if row['field'] == "current":
+                # Everything in CSV is a string, so we need to coerce the value to the correct type
+                await client.set(await client.coerce_updates({row['signal']: row['value']}))
+                logging.info("Update current value of %s to %s", row['signal'], row['value'])
+            elif row['field'] == "target":
+                # Everything in CSV is a string, so we need to coerce the value to the correct type
+                await client.actuate(await client.coerce_updates({row['signal']: row['value']}))
+                logging.info("Update target value of %s to %s", row['signal'], row['value'])
+        except KuksaError as ex:
             logging.error("Error while updating %s\n%s", row['signal'], ex)
+
         try:
             await asyncio.sleep(delay=float(row['delay']))
         except ValueError:

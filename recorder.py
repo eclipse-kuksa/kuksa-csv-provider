@@ -24,13 +24,8 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from kuksa_client.grpc.aio import VSSClient
-from kuksa_client.grpc import VSSClientError
-from kuksa_client.grpc import View
-from kuksa_client.grpc import SubscribeEntry
-from kuksa_client.grpc import MetadataField
-
-from kuksa_client.grpc import Field
+from kuksa_client.v2.aio import KuksaClient
+from kuksa_client.v2 import KuksaError
 
 
 def init_argparse() -> argparse.ArgumentParser:
@@ -129,62 +124,45 @@ async def main():
     server_uri = resolve_server_uri(parser, args)
     host, port, root_path, tls_server_name = get_connection_details(parser, server_uri, args)
     try:
-        async with VSSClient(host, port, root_certificates=root_path,
-                             tls_server_name=tls_server_name) as client:
+        async with KuksaClient(host, port, root_certificates=root_path,
+                               tls_server_name=tls_server_name) as client:
             fieldnames = ['field', 'signal', 'value', 'delay']
             if args.with_datatype:
                 fieldnames.append('datatype')
             csvfile = open(args.file, 'w', newline='', encoding="utf-8", buffering=1)
             signalwriter = csv.DictWriter(csvfile, fieldnames)
             signalwriter.writeheader()
-            signal_datatypes = {}
             previous_time = time.time()
-            initial_value = True
-            entries = []
-            for signal in args.signals:
-                entries.append(SubscribeEntry(signal,
-                                              View.FIELDS,
-                                              (Field.VALUE, Field.ACTUATOR_TARGET)))
-            async for updates in client.subscribe(entries=entries):
-                if initial_value:
-                    time_gap = 0.0
-                    initial_value = False
-                else:
+            time_gap = 0.0
+            # Expand any "*" widlcards
+            logging.debug("Expanding signals %s" % args.signals)
+            expanded_signals = []
+            for path in args.signals:
+                expanded_signals.extend(await client.expand(path))
+            # de-duplicate, in case wildcards overlap
+            expanded_signals = list(dict.fromkeys(expanded_signals))
+
+            logging.debug(f"Subscribing to expanded signals: {expanded_signals}")
+
+            async for updates in client.subscribe(expanded_signals):
+                logging.debug("Received updates: %s" % updates)
+                for path, dp in updates.items():
+                    if dp.value is None:
+                        logging.warning("Received update with no value for signal %s", path)
+                        continue
                     current_time = time.time()
                     time_gap = current_time - previous_time
                     previous_time = current_time
-                for update in updates:
-                    entry = update.entry
-                    if args.with_datatype and entry.path not in signal_datatypes:
-                        try:
-                            metadata_response = await client.get_metadata(
-                                [entry.path], MetadataField.DATA_TYPE)
-                            signal_datatypes[entry.path] = (
-                                metadata_response[entry.path].data_type.name)
-                        except (VSSClientError, KeyError):
-                            logging.warning(
-                                "Could not resolve datatype for %s, defaulting to UNSPECIFIED",
-                                entry.path)
-                            signal_datatypes[entry.path] = "UNSPECIFIED"
-                    if entry.value is not None:
-                        row = {'field': 'current',
-                               'signal': entry.path,
-                               'value': entry.value.value,
-                               'delay': time_gap}
-                        if args.with_datatype:
-                            row['datatype'] = signal_datatypes.get(entry.path, "UNSPECIFIED")
-                        signalwriter.writerow(row)
-                    if entry.actuator_target is not None:
-                        row = {'field': 'target',
-                               'signal': entry.path,
-                               'value': entry.actuator_target.value,
-                               'delay': time_gap}
-                        if args.with_datatype:
-                            row['datatype'] = signal_datatypes.get(entry.path, "UNSPECIFIED")
-                        signalwriter.writerow(row)
-    except VSSClientError as error:
-        logging.error("There was a problem in the interaction"
-                      " with the KUKSA databroker at %s: %s ",
-                      server_uri, str(error))
+                    row = {'field': 'current',
+                           'signal': path,
+                           'value': dp.value,
+                           'delay': time_gap}
+                    if args.with_datatype:
+                        row['datatype'] = (await client.get_metadata(path)).data_type.name
+
+                    logging.debug("Writing row: %s" % row)
+                    signalwriter.writerow(row)
+    except KuksaError as error:
+        logging.error("Error communicating with KUKSA databroker: %s:", error)
 
 asyncio.run(main())
